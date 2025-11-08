@@ -21,7 +21,7 @@ app = Flask(__name__)
 # Configuration
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'wetmaps')
 RANDOM_SEED = 42
-CLASS_NAMES = ['Marsh', 'Shallow Open Water', 'Swamp', 'Fen']
+CLASS_NAMES = ['Marsh', 'Shallow Open Water', 'Swamp', 'Fen', 'Non-Wetland']
 
 # Initialize GCS client
 storage_client = storage.Client()
