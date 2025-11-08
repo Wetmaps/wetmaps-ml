@@ -8,8 +8,8 @@
 // -----------------------------
 var RANDOM_SEED = 42;
 var SCALE = 50;
-var PROJECT_ID = 'wetmaps-476922';
-var BUCKET_NAME = 'wetmaps';
+var PROJECT_ID = 'your-gcp-project-id'; // REPLACE THIS
+var BUCKET_NAME = 'wetland-classification'; // REPLACE THIS
 
 var canonicalClassDict = ee.Dictionary({
   'Marsh': 0,

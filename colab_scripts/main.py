@@ -56,12 +56,19 @@ def load_training_data(csv_path):
     X = df[available_cols].values
     y = df['classIndex'].values
     
-    print(f"✓ Loaded {len(X)} samples with {X.shape[1]} features")
-    print(f"Class distribution: {dict(zip(CLASS_NAMES, np.bincount(y)))}")
+    # Get unique classes present in data
+    unique_classes = sorted(np.unique(y))
+    class_counts = np.bincount(y)
     
-    return X, y
+    print(f"✓ Loaded {len(X)} samples with {X.shape[1]} features")
+    print(f"Unique classes in data: {unique_classes}")
+    print(f"Class distribution:")
+    for cls in unique_classes:
+        print(f"  {CLASS_NAMES[cls]}: {class_counts[cls]} samples")
+    
+    return X, y, unique_classes
 
-def train_random_forest(X, y):
+def train_random_forest(X, y, unique_classes):
     """Train Random Forest classifier with 70/15/15 split"""
     print("\n=== TRAINING RANDOM FOREST ===")
     
@@ -103,8 +110,17 @@ def train_random_forest(X, y):
     y_test_pred = clf.predict(X_test)
     test_accuracy = accuracy_score(y_test, y_test_pred)
     
-    conf_matrix = confusion_matrix(y_test, y_test_pred)
-    class_report = classification_report(y_test, y_test_pred, target_names=CLASS_NAMES)
+    # Get class names for classes that are actually present
+    present_class_names = [CLASS_NAMES[i] for i in unique_classes]
+    
+    # Compute confusion matrix only for present classes
+    conf_matrix = confusion_matrix(y_test, y_test_pred, labels=unique_classes)
+    class_report = classification_report(
+        y_test, y_test_pred,
+        labels=unique_classes,
+        target_names=present_class_names,
+        zero_division=0
+    )
     
     print(f"\n{'='*50}")
     print(f"VALIDATION ACCURACY: {val_accuracy*100:.1f}%")
@@ -112,16 +128,27 @@ def train_random_forest(X, y):
     print(f"{'='*50}")
     print(f"\nConfusion Matrix:")
     print(f"{'':>20} Predicted")
-    print(f"{'':>20} {'M':>6} {'SW':>6} {'Sw':>6} {'Fen':>6}")
-    for i, row in enumerate(conf_matrix):
-        print(f"Actual {CLASS_NAMES[i]:>15} {row[0]:>6} {row[1]:>6} {row[2]:>6} {row[3]:>6}")
+    
+    # Print header with only present classes
+    header = f"{'':>20} "
+    for cls in unique_classes:
+        header += f"{CLASS_NAMES[cls][:6]:>8}"
+    print(header)
+    
+    # Print confusion matrix rows
+    for i, cls_idx in enumerate(unique_classes):
+        row_str = f"Actual {CLASS_NAMES[cls_idx]:>13} "
+        for j in range(len(unique_classes)):
+            row_str += f"{conf_matrix[i, j]:>8}"
+        print(row_str)
+    
     print(f"\nClassification Report:")
     print(class_report)
     
-    # Calculate per-class metrics
+    # Calculate per-class metrics for present classes only
     precision = []
     recall = []
-    for i in range(len(CLASS_NAMES)):
+    for i, cls_idx in enumerate(unique_classes):
         tp = conf_matrix[i, i]
         fp = conf_matrix[:, i].sum() - tp
         fn = conf_matrix[i, :].sum() - tp
@@ -132,15 +159,17 @@ def train_random_forest(X, y):
         precision.append(prec)
         recall.append(rec)
         
-        print(f"{CLASS_NAMES[i]:>20}: Precision={prec*100:.1f}%, Recall={rec*100:.1f}%")
+        print(f"{CLASS_NAMES[cls_idx]:>20}: Precision={prec*100:.1f}%, Recall={rec*100:.1f}%")
     
     results = {
         'val_accuracy': float(val_accuracy),
         'test_accuracy': float(test_accuracy),
         'confusion_matrix': conf_matrix.tolist(),
-        'precision': precision,
-        'recall': recall,
-        'classification_report': class_report
+        'precision': [float(p) for p in precision],
+        'recall': [float(r) for r in recall],
+        'classification_report': class_report,
+        'unique_classes': [int(c) for c in unique_classes],
+        'class_names': present_class_names
     }
     
     return clf, results
@@ -157,6 +186,12 @@ def classify_geotiff(model, input_tif_path, output_tif_path):
         
         print(f"Image shape: {img.shape}")
         print(f"Bands: {src.count}, Height: {src.height}, Width: {src.width}")
+        
+        # Only use first 16 bands (A00-A15) to match training data
+        n_features = model.n_features_in_
+        if img.shape[0] > n_features:
+            print(f"Using only first {n_features} bands (model was trained on {n_features} features)")
+            img = img[:n_features, :, :]
         
         # Reshape for prediction: (height*width, bands)
         height, width = img.shape[1], img.shape[2]
@@ -192,8 +227,13 @@ def classify_geotiff(model, input_tif_path, output_tif_path):
         
         # Calculate class distribution (exclude nodata)
         valid_classified = classified[classified != 255]
-        class_dist = {CLASS_NAMES[i]: int(np.sum(valid_classified == i)) 
-                      for i in range(len(CLASS_NAMES))}
+        
+        # Only count classes that exist in the output
+        unique_predicted = np.unique(valid_classified)
+        class_dist = {}
+        for cls in unique_predicted:
+            if cls < len(CLASS_NAMES):  # Safety check
+                class_dist[CLASS_NAMES[cls]] = int(np.sum(valid_classified == cls))
         
         print("\nClass Distribution:")
         for class_name, count in class_dist.items():
@@ -242,11 +282,11 @@ def train_endpoint():
             local_csv = os.path.join(tmpdir, 'training_data.csv')
             download_from_gcs(training_csv, local_csv)
             
-            # Load data
-            X, y = load_training_data(local_csv)
+            # Load data (now returns unique_classes too)
+            X, y, unique_classes = load_training_data(local_csv)
             
             # Train model
-            model, results = train_random_forest(X, y)
+            model, results = train_random_forest(X, y, unique_classes)
             
             # Save model
             local_model = os.path.join(tmpdir, 'model.joblib')
@@ -273,7 +313,9 @@ def train_endpoint():
                 'results': {
                     'val_accuracy': results['val_accuracy'],
                     'test_accuracy': results['test_accuracy'],
-                    'confusion_matrix': results['confusion_matrix']
+                    'confusion_matrix': results['confusion_matrix'],
+                    'unique_classes': results['unique_classes'],
+                    'class_names': results['class_names']
                 }
             }), 200
             
