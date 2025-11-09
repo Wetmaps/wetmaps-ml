@@ -46,8 +46,8 @@ def load_training_data(csv_path):
     print(f"Loading training data from {csv_path}...")
     df = pd.read_csv(csv_path)
     
-    # Extract feature columns (AlphaEarth bands A00-A15)
-    feature_cols = [f'A{i:02d}' for i in range(16)]
+    # Extract feature columns (AlphaEarth bands A00-A63)
+    feature_cols = [f'A{i:02d}' for i in range(64)]
     
     # Check which columns exist
     available_cols = [col for col in feature_cols if col in df.columns]
@@ -187,10 +187,8 @@ def classify_geotiff(model, input_tif_path, output_tif_path):
         print(f"Image shape: {img.shape}")
         print(f"Bands: {src.count}, Height: {src.height}, Width: {src.width}")
         
-        # Only use first 16 bands (A00-A15) to match training data
         n_features = model.n_features_in_
         if img.shape[0] > n_features:
-            print(f"Using only first {n_features} bands (model was trained on {n_features} features)")
             img = img[:n_features, :, :]
         
         # Reshape for prediction: (height*width, bands)
