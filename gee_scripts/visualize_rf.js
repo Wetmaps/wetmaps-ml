@@ -9,15 +9,8 @@ var classified = ee.Image('projects/wetmaps-476922/assets/calgary_classified');
 // Mask out any pixels that are class 3 (Fen) - these are artifacts
 var classifiedClean = classified.updateMask(classified.neq(3));
 
-// Rest of visualization code...
-Map.addLayer(
-  classifiedClean,  // Use cleaned version
-  {min: 0, max: 4, palette: palette},
-  'Wetland Classification (Cloud Run)'
-);
-
 // Define visualization (5 classes now!)
-var palette = ['blue', 'cyan', 'green', 'yellow', 'gray'];
+var palette = ['#a6d96a', 'blue', 'green', 'yellow', '#d3d3d3'];
 var classNames = ['Marsh', 'Shallow Open Water', 'Swamp', 'Fen', 'Non-Wetland'];
 
 // Center on Calgary
