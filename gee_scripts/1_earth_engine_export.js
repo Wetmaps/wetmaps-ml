@@ -155,9 +155,9 @@ selectors.push('.geo');
 
 Export.table.toCloudStorage({
   collection: allSamples,
-  description: 'wetland_training_samples_calgary',
+  description: 'lucas_wetland_training_samples_calgary',
   bucket: BUCKET_NAME,
-  fileNamePrefix: 'training_data/calgary_samples',
+  fileNamePrefix: 'training_data/lucas/calgary_samples',
   fileFormat: 'CSV',
   selectors: selectors
 });
@@ -165,9 +165,9 @@ Export.table.toCloudStorage({
 // Export AlphaEarth
 Export.image.toCloudStorage({
   image: alphaEarth2024,
-  description: 'alphaearth_calgary_full',
+  description: 'lucas_alphaearth_calgary_full',
   bucket: BUCKET_NAME,
-  fileNamePrefix: 'inference_data/calgary_alphaearth',
+  fileNamePrefix: 'inference_data/lucas/calgary_alphaearth',
   region: calgaryBounds,
   scale: SCALE,
   maxPixels: 1e13,
