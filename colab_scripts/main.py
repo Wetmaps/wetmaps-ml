@@ -1,6 +1,6 @@
 """
 Cloud Run Service - Wetland Classification
-Trains Random Forest on AlphaEarth embeddings and classifies wetlands
+Trains Random Forest & SVM on AlphaEarth embeddings and classifies wetlands
 """
 
 import os
@@ -12,8 +12,10 @@ import rasterio
 from flask import Flask, request, jsonify
 from google.cloud import storage
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.svm import SVC
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.preprocessing import StandardScaler
 import joblib
 
 app = Flask(__name__)
@@ -174,7 +176,121 @@ def train_random_forest(X, y, unique_classes):
     
     return clf, results
 
-def classify_geotiff(model, input_tif_path, output_tif_path):
+def train_svm(X, y, unique_classes):
+    """Train SVM classifier with 70/15/15 split"""
+    print("\n=== TRAINING SVM ===")
+    
+    # Split: 70% train, 30% temp
+    X_train, X_temp, y_train, y_temp = train_test_split(
+        X, y, test_size=0.30, random_state=RANDOM_SEED, stratify=y
+    )
+    
+    # Split temp into 15% val, 15% test
+    X_val, X_test, y_val, y_test = train_test_split(
+        X_temp, y_temp, test_size=0.50, random_state=RANDOM_SEED, stratify=y_temp
+    )
+    
+    print(f"Training samples: {len(X_train)}")
+    print(f"Validation samples: {len(X_val)}")
+    print(f"Test samples: {len(X_test)}")
+    
+    # Scale features (important for SVM)
+    print("\nScaling features...")
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val)
+    X_test_scaled = scaler.transform(X_test)
+    
+    # Train SVM with RBF kernel
+    clf = SVC(
+        kernel='rbf',
+        C=10.0,
+        gamma='scale',
+        random_state=RANDOM_SEED,
+        verbose=True,
+        cache_size=1000
+    )
+    
+    print("\nTraining SVM (RBF kernel)...")
+    clf.fit(X_train_scaled, y_train)
+    print("✓ Training complete!")
+    
+    # Validation metrics
+    print("\nEvaluating on validation set...")
+    y_val_pred = clf.predict(X_val_scaled)
+    val_accuracy = accuracy_score(y_val, y_val_pred)
+    
+    # Test metrics
+    print("Evaluating on test set...")
+    y_test_pred = clf.predict(X_test_scaled)
+    test_accuracy = accuracy_score(y_test, y_test_pred)
+    
+    # Get class names for classes that are actually present
+    present_class_names = [CLASS_NAMES[i] for i in unique_classes]
+    
+    # Compute confusion matrix only for present classes
+    conf_matrix = confusion_matrix(y_test, y_test_pred, labels=unique_classes)
+    class_report = classification_report(
+        y_test, y_test_pred,
+        labels=unique_classes,
+        target_names=present_class_names,
+        zero_division=0
+    )
+    
+    print(f"\n{'='*50}")
+    print(f"VALIDATION ACCURACY: {val_accuracy*100:.1f}%")
+    print(f"TEST ACCURACY: {test_accuracy*100:.1f}%")
+    print(f"{'='*50}")
+    print(f"\nConfusion Matrix:")
+    print(f"{'':>20} Predicted")
+    
+    # Print header with only present classes
+    header = f"{'':>20} "
+    for cls in unique_classes:
+        header += f"{CLASS_NAMES[cls][:6]:>8}"
+    print(header)
+    
+    # Print confusion matrix rows
+    for i, cls_idx in enumerate(unique_classes):
+        row_str = f"Actual {CLASS_NAMES[cls_idx]:>13} "
+        for j in range(len(unique_classes)):
+            row_str += f"{conf_matrix[i, j]:>8}"
+        print(row_str)
+    
+    print(f"\nClassification Report:")
+    print(class_report)
+    
+    # Calculate per-class metrics for present classes only
+    precision = []
+    recall = []
+    for i, cls_idx in enumerate(unique_classes):
+        tp = conf_matrix[i, i]
+        fp = conf_matrix[:, i].sum() - tp
+        fn = conf_matrix[i, :].sum() - tp
+        
+        prec = tp / (tp + fp) if (tp + fp) > 0 else 0
+        rec = tp / (tp + fn) if (tp + fn) > 0 else 0
+        
+        precision.append(prec)
+        recall.append(rec)
+        
+        print(f"{CLASS_NAMES[cls_idx]:>20}: Precision={prec*100:.1f}%, Recall={rec*100:.1f}%")
+    
+    results = {
+        'val_accuracy': float(val_accuracy),
+        'test_accuracy': float(test_accuracy),
+        'confusion_matrix': conf_matrix.tolist(),
+        'precision': [float(p) for p in precision],
+        'recall': [float(r) for r in recall],
+        'classification_report': class_report,
+        'unique_classes': [int(c) for c in unique_classes],
+        'class_names': present_class_names
+    }
+    
+    # Return both model and scaler (SVM needs scaler for inference)
+    return (clf, scaler), results
+
+def classify_geotiff(model, input_tif_path, output_tif_path, scaler=None):
     """Classify AlphaEarth GeoTIFF and save result"""
     print(f"\n=== CLASSIFYING GEOTIFF ===")
     print(f"Opening {input_tif_path}...")
@@ -197,8 +313,12 @@ def classify_geotiff(model, input_tif_path, output_tif_path):
         
         # Handle NaN/invalid values
         valid_mask = ~np.isnan(img_flat).any(axis=1)
-        
         print(f"Valid pixels: {valid_mask.sum():,} / {len(valid_mask):,}")
+        
+        # Apply scaling if SVM model
+        if scaler is not None:
+            print("Applying feature scaling for SVM...")
+            img_flat[valid_mask] = scaler.transform(img_flat[valid_mask])
         
         # Predict on valid pixels
         print("Running classification...")
@@ -256,22 +376,31 @@ def health():
 @app.route('/train', methods=['POST'])
 def train_endpoint():
     """
-    Train Random Forest model on samples from Cloud Storage
+    Train classifier (Random Forest or SVM) on samples from Cloud Storage
     
     Request body:
     {
-        "training_csv": "training_data/calgary_samples.csv",
-        "model_output": "models/wetland_rf_model.joblib"
+        "training_csv": "training_data/lucas/calgary_samples.csv",
+        "model_output": "models/lucas/wetland_rf_model.joblib",
+        "model_type": "rf"  // "rf" or "svm"
     }
     """
     try:
         data = request.get_json() or {}
-        training_csv = data.get('training_csv', 'training_data/calgary_samples.csv')
-        model_output = data.get('model_output', 'models/wetland_rf_model.joblib')
+        training_csv = data.get('training_csv', 'training_data/lucas/calgary_samples.csv')
+        model_output = data.get('model_output', 'models/lucas/wetland_rf_model.joblib')
+        model_type = data.get('model_type', 'svm').lower()  # Default to Random Forest
+        
+        if model_type not in ['rf', 'svm']:
+            return jsonify({
+                'status': 'error',
+                'message': 'Invalid model_type. Must be "rf" or "svm"'
+            }), 400
         
         print(f"\n{'='*60}")
         print(f"TRAINING REQUEST RECEIVED")
         print(f"{'='*60}")
+        print(f"Model type: {model_type.upper()}")
         print(f"Training CSV: gs://{BUCKET_NAME}/{training_csv}")
         print(f"Model output: gs://{BUCKET_NAME}/{model_output}")
         
@@ -280,11 +409,15 @@ def train_endpoint():
             local_csv = os.path.join(tmpdir, 'training_data.csv')
             download_from_gcs(training_csv, local_csv)
             
-            # Load data (now returns unique_classes too)
+            # Load data
             X, y, unique_classes = load_training_data(local_csv)
             
-            # Train model
-            model, results = train_random_forest(X, y, unique_classes)
+            # Train model based on type
+            if model_type == 'rf':
+                model, results = train_random_forest(X, y, unique_classes)
+                scaler = None
+            else:  # svm
+                (model, scaler), results = train_svm(X, y, unique_classes)
             
             # Save model
             local_model = os.path.join(tmpdir, 'model.joblib')
@@ -292,7 +425,16 @@ def train_endpoint():
             joblib.dump(model, local_model)
             upload_to_gcs(local_model, model_output)
             
+            # Save scaler if SVM
+            if scaler is not None:
+                scaler_path = model_output.replace('.joblib', '_scaler.joblib')
+                local_scaler = os.path.join(tmpdir, 'scaler.joblib')
+                print(f"Saving scaler to {local_scaler}...")
+                joblib.dump(scaler, local_scaler)
+                upload_to_gcs(local_scaler, scaler_path)
+            
             # Save results
+            results['model_type'] = model_type
             results_json = json.dumps(results, indent=2)
             results_path = model_output.replace('.joblib', '_results.json')
             local_results = os.path.join(tmpdir, 'results.json')
@@ -304,8 +446,9 @@ def train_endpoint():
             print(f"TRAINING COMPLETE!")
             print(f"{'='*60}")
             
-            return jsonify({
+            response = {
                 'status': 'success',
+                'model_type': model_type,
                 'model_path': f'gs://{BUCKET_NAME}/{model_output}',
                 'results_path': f'gs://{BUCKET_NAME}/{results_path}',
                 'results': {
@@ -315,7 +458,12 @@ def train_endpoint():
                     'unique_classes': results['unique_classes'],
                     'class_names': results['class_names']
                 }
-            }), 200
+            }
+            
+            if scaler is not None:
+                response['scaler_path'] = f'gs://{BUCKET_NAME}/{scaler_path}'
+            
+            return jsonify(response), 200
             
     except Exception as e:
         print(f"\n{'='*60}")
@@ -332,20 +480,23 @@ def classify_endpoint():
     
     Request body:
     {
-        "model_path": "models/wetland_rf_model.joblib",
-        "input_tif": "inference_data/calgary_alphaearth.tif",
-        "output_tif": "results/calgary_classified.tif"
+        "model_path": "models/lucas/wetland_rf_model.joblib",
+        "input_tif": "inference_data/lucas/calgary_alphaearth.tif",
+        "output_tif": "results/lucas/calgary_classified.tif",
+        "model_type": "rf"  // "rf" or "svm" (auto-detects if scaler exists)
     }
     """
     try:
         data = request.get_json() or {}
-        model_path = data.get('model_path', 'models/wetland_rf_model.joblib')
-        input_tif = data.get('input_tif', 'inference_data/calgary_alphaearth.tif')
-        output_tif = data.get('output_tif', 'results/calgary_classified.tif')
+        model_path = data.get('model_path', 'models/lucas/wetland_rf_model.joblib')
+        input_tif = data.get('input_tif', 'inference_data/lucas/calgary_alphaearth.tif')
+        output_tif = data.get('output_tif', 'results/lucas/calgary_classified.tif')
+        model_type = data.get('model_type', 'svm').lower()
         
         print(f"\n{'='*60}")
         print(f"CLASSIFICATION REQUEST RECEIVED")
         print(f"{'='*60}")
+        print(f"Model type: {model_type.upper()}")
         print(f"Model: gs://{BUCKET_NAME}/{model_path}")
         print(f"Input: gs://{BUCKET_NAME}/{input_tif}")
         print(f"Output: gs://{BUCKET_NAME}/{output_tif}")
@@ -358,13 +509,26 @@ def classify_endpoint():
             model = joblib.load(local_model)
             print(f"✓ Model loaded (trained on {model.n_features_in_} features)")
             
+            # Download scaler if SVM
+            scaler = None
+            if model_type == 'svm':
+                scaler_path = model_path.replace('.joblib', '_scaler.joblib')
+                local_scaler = os.path.join(tmpdir, 'scaler.joblib')
+                try:
+                    download_from_gcs(scaler_path, local_scaler)
+                    scaler = joblib.load(local_scaler)
+                    print("✓ Scaler loaded for SVM")
+                except Exception as e:
+                    print(f"Warning: Could not load scaler: {e}")
+                    print("Proceeding without scaling (may affect accuracy)")
+            
             # Download input GeoTIFF
             local_input = os.path.join(tmpdir, 'input.tif')
             download_from_gcs(input_tif, local_input)
             
             # Classify
             local_output = os.path.join(tmpdir, 'classified.tif')
-            class_dist = classify_geotiff(model, local_input, local_output)
+            class_dist = classify_geotiff(model, local_input, local_output, scaler)
             
             # Upload result
             upload_to_gcs(local_output, output_tif)
@@ -375,6 +539,7 @@ def classify_endpoint():
             
             return jsonify({
                 'status': 'success',
+                'model_type': model_type,
                 'output_path': f'gs://{BUCKET_NAME}/{output_tif}',
                 'class_distribution': class_dist
             }), 200
